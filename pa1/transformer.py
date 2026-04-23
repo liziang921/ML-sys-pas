@@ -371,7 +371,7 @@ def cross_entropy_loss(
     """
     probs = ad.softmax(logits, dim=-1)
     log_probs = ad.log(probs + 1e-10)
-    loss = -ad.sum_op(targets_onehot * log_probs, dim=(0, 1, 2), keepdim=True) / num_tokens
+    loss = (-1) * ad.sum_op(targets_onehot * log_probs, dim=(0, 1, 2), keepdim=True) / num_tokens
     return loss
 
 
@@ -521,10 +521,13 @@ def generate(
     tokens = encode(prompt)
 
     for _ in range(max_new_tokens):
+        if len(tokens) > SEQ_LEN:
+            break
+
         logits = run_forward(tokens)  # (1, SEQ_LEN, VOCAB_SIZE)
         next_token = torch.argmax(logits[0, len(tokens) - 1]).item()
 
-        if next_token == 0 or len(tokens) >= SEQ_LEN:
+        if next_token == 0:
             break
 
         tokens.append(next_token)

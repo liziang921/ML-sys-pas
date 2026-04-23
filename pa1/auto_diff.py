@@ -382,6 +382,51 @@ class ExpandAsOp3d(Op):
         
         return [sum_op(output_grad,dim=(0, 1)), zeros_like(output_grad)]  # a bit of mismatch ??
 
+
+class ExpandToLikeOp(Op):
+    """Expand a reduced tensor back to the shape of another tensor."""
+
+    def __call__(self, node_A: Node, node_B: Node, dim, keepdim: bool = False) -> Node:
+        if isinstance(dim, int):
+            dim = (dim,)
+        else:
+            dim = tuple(dim)
+
+        return Node(
+            inputs=[node_A, node_B],
+            op=self,
+            attrs={"dim": dim, "keepdim": keepdim},
+            name=f"ExpandToLike({node_A.name}->{node_B.name})",
+        )
+
+    def compute(self, node: Node, input_values: List[torch.Tensor]) -> torch.Tensor:
+        assert len(input_values) == 2
+        input_tensor, target_tensor = input_values
+
+        dims = node.dim
+        keepdim = node.keepdim
+
+        if not keepdim:
+            rank = target_tensor.dim()
+            dims = tuple(d if d >= 0 else d + rank for d in dims)
+            out = input_tensor
+            for d in sorted(dims):
+                out = out.unsqueeze(d)
+        else:
+            out = input_tensor
+
+        return out.expand_as(target_tensor)
+
+    def gradient(self, node: Node, output_grad: Node) -> List[Node]:
+        dims = node.dim
+        keepdim = node.keepdim
+
+        grad_A = sum_op(output_grad, dim=dims, keepdim=keepdim)
+        grad_B = zeros_like(node.inputs[1])
+
+        return [grad_A, grad_B]
+
+
 class LogOp(Op):
     """Logarithm (natural log) operation."""
 
@@ -462,7 +507,7 @@ class DivOp(Op):
     def gradient(self, node: Node, output_grad: Node) -> List[Node]:
         """Given gradient of division node, return partial adjoint to each input."""
         x1, x2 = node.inputs
-        return [output_grad / x2, output_grad * (-x1 / (x2 * x2))]
+        return [output_grad / x2, output_grad * ((-1) * x1 / (x2 * x2))]
 
 class DivByConstOp(Op):
     """Op to element-wise divide a nodes by a constant."""
@@ -668,10 +713,14 @@ class PowerOp(Op):
         return [output_grad * exponent * power(x, exponent - 1)]
 
 class MeanOp(Op):
-    """Op to compute mean along specified dimensions.
-    """
+    """Op to compute mean along specified dimensions."""
 
-    def __call__(self, node_A: Node, dim: tuple, keepdim: bool = False) -> Node:
+    def __call__(self, node_A: Node, dim, keepdim: bool = False) -> Node:
+        if isinstance(dim, int):
+            dim = (dim,)
+        else:
+            dim = tuple(dim)
+
         return Node(
             inputs=[node_A],
             op=self,
@@ -681,21 +730,16 @@ class MeanOp(Op):
 
     def compute(self, node: Node, input_values: List[torch.Tensor]) -> torch.Tensor:
         assert len(input_values) == 1
-        x = input_values[0]
-        node.attrs["input_shape"] = tuple(x.shape)
-        return x.mean(dim=node.dim, keepdim=node.keepdim)
+        return input_values[0].mean(dim=node.dim, keepdim=node.keepdim)
 
     def gradient(self, node: Node, output_grad: Node) -> List[Node]:
-        if not node.keepdim:
-            raise NotImplementedError("Simple MeanOp.gradient only supports keepdim=True for now.")
-        
-        input_shape = node.attrs["input_shape"]
-        count = 1
-        for d in node.dim:
-            count *= input_shape[d]
-        
-        grad = broadcast(output_grad, input_shape=input_shape, target_shape=input_shape)
-        return [grad / count]
+        x = node.inputs[0]
+
+        count = sum_op(ones_like(x), dim=node.dim, keepdim=node.keepdim)
+        scaled_grad = output_grad / count
+        grad_x = expand_to_like(scaled_grad, x, dim=node.dim, keepdim=node.keepdim)
+
+        return [grad_x]
         
 
 # Create global instances of ops.
@@ -724,6 +768,8 @@ expand_as_3d = ExpandAsOp3d()
 log = LogOp()
 sub = SubOp()
 broadcast = BroadcastOp()
+expand_to_like = ExpandToLikeOp()
+
 
 def topological_sort(nodes):
     """Helper function to perform topological sort on nodes.
