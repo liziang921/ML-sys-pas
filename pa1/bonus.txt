@@ -1,0 +1,57 @@
+Let t be the current context length during decoding, T be the number of newly generated tokens, and d be the model dimension. For simplicity, I analyze one decoder layer and ignore constant factors.
+
+1. Time complexity per decoding step without KV cache
+
+At decoding step t, the current implementation runs a full forward pass on the entire prefix of length t.
+
+- Computing Q, K, and V costs O(t d^2).
+- Computing attention scores QK^T costs O(t^2 d).
+- Multiplying attention weights by V costs O(t^2 d).
+- The feed-forward block costs O(t d^2).
+
+So the per-step time complexity is:
+
+O(t^2 d + t d^2)
+
+For long contexts, the quadratic attention term is usually the dominant part, so this is often summarized as O(t^2 d).
+
+2. Total time complexity to generate T new tokens without KV cache
+
+If the initial prompt length is t0, then generation evaluates sequence lengths:
+
+t0, t0 + 1, ..., t0 + T - 1
+
+Therefore the total time is:
+
+sum_{t=t0}^{t0+T-1} O(t^2 d + t d^2)
+
+= O(T^3 d + T^2 d^2)
+
+If we focus on the dominant repeated-attention cost, this is commonly summarized as O(T^3 d).
+
+3. Space complexity without KV cache during generation
+
+At one decoding step with current length t, the main forward activations include:
+
+- hidden states and projected Q, K, V: O(t d)
+- attention scores / weights: O(t^2)
+
+So the space complexity per decoding step is:
+
+O(t d + t^2)
+
+This shows the usual quadratic memory cost of attention in sequence length.
+
+4. Reducing repeated computation
+
+Yes. We can use a KV cache.
+
+During autoregressive decoding, the keys and values of previous tokens do not change. Instead of recomputing K and V for the whole prefix at every step, we can cache the old K and V and only compute Q, K, and V for the newly generated token.
+
+With KV cache:
+
+- per-step time becomes O(t d + d^2), often summarized as O(t d)
+- total time over T generated tokens becomes O(T^2 d) instead of O(T^3 d)
+- extra cache space is O(t d), since we must store all previous keys and values
+
+So KV caching trades additional memory for much less repeated computation during decoding.
