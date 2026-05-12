@@ -32,14 +32,19 @@ def matmul_add_relu_kernel_fp16(
     # Each kernel instance is mapped to a tile in the output matrix C.
     # Compute the starting indices (m_start, n_start) for this tile.
     # -------------------------------------------------------------------------
-    # TODO: Compute the tile indices using program_id(0) for M and program_id(1) for N.
-    ...
+    # Compute the tile indices using program_id(0) for M and program_id(1) for N.
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
 
     # -------------------------------------------------------------------------
     # Step 2: Register Tiling
     # -------------------------------------------------------------------------
-    # TODO: Initialize the accumulator "acc" with zeros (dtype: float16 or float32).
-    acc = ...
+    # Initialize the accumulator "acc" with zeros (dtype: float16 or float32).
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     # -------------------------------------------------------------------------
     # Step 3: Shared Memory Tiling & Cooperative Fetching.
@@ -47,18 +52,42 @@ def matmul_add_relu_kernel_fp16(
     # the current C tile. The offsets here serve to load BLOCK_M x BLOCK_K
     # and BLOCK_K x BLOCK_N blocks from A and B respectively.
     # -------------------------------------------------------------------------
-    # TODO: Finish code below.
-    for k in range(0, ...):
-        ...
+    # Finish code below.
+    for k in range(0, K, BLOCK_K):
+        k_offsets = k + offs_k
+
+        a_tile = tl.load(
+            a_ptr + offs_m[:, None] * stride_am + k_offsets[None, :] * stride_ak,
+            mask=(offs_m[:, None] < M) & (k_offsets[None, :] < K),
+            other=0.0,
+        )
+
+        b_tile = tl.load(
+            b_ptr + k_offsets[:, None] * stride_bk + offs_n[None, :] * stride_bn,
+            mask=(k_offsets[:, None] < K) & (offs_n[None, :] < N),
+            other=0.0,
+        )
+
+        acc += tl.dot(a_tile, b_tile)
 
     # -------------------------------------------------------------------------
     # Step 4: Add C and Apply ReLU to the accumulator
     # -------------------------------------------------------------------------
-    # TODO: Finish code below.
-    ...
+    # Finish code below.
+    c_tile = tl.load(
+        c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
+        mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
+        other=0.0,
+    )
+
+    out = tl.maximum(acc + c_tile, 0.0)
 
     # -------------------------------------------------------------------------
     # Step 5: Write Cache / Epilogue Fusion: Write the computed tile to D.
     # -------------------------------------------------------------------------
-    # TODO: Finish code below.
-    ...
+    # Finish code below.
+    tl.store(
+        d_ptr + offs_m[:, None] * stride_dm + offs_n[None, :] * stride_dn,
+        out.to(tl.float16),
+        mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
+    )
