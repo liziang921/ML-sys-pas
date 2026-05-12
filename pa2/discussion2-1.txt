@@ -1,1 +1,1 @@
-Put discussion here for 2.1
+My custom all-reduce is slightly slower than MPI.Allreduce, about 1.12x the runtime, because it uses a simple point-to-point reduce-to-root and broadcast pattern rather than MPI's optimized collective algorithms. My custom all-to-all is essentially the same speed as MPI.Alltoall on this small benchmark, likely because the message size is tiny and the Sendrecv exchange pattern has low overhead at 8 processes.
