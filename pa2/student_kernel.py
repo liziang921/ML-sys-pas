@@ -2,6 +2,7 @@ KERNEL_CONFIGS = [
     {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "num_warps": 8, "num_stages": 4},
     {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32, "num_warps": 4, "num_stages": 4},
     {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 32, "num_warps": 8, "num_stages": 4},
+    {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 32, "num_warps": 8, "num_stages": 3},
 ]
 
 
