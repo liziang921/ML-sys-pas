@@ -127,6 +127,18 @@ class ShardedLinear:
         # TODO (Part 1.1): compute this rank's partial output and use a
         # collective so every rank ends up with the full
         # (batch_size, out_features) result.
+        local_output = np.dot(x, self.weight) + self.bias
+        
+        padded_output = np.zeros(
+            (x.shape[0], self.out_features_global),
+            dtype=local_output.dtype
+        )
+
+        start = self.output_offset
+        end = start + self.local_out_features
+        padded_output[:, start:end] = local_output
+
+        mpi.Allreduce(padded_output, result, op=mpi.SUM)
         return result
 
 
@@ -191,6 +203,14 @@ class MoE_TP:
         #    gate-combine the results into `outputs`.
         indices, gates = self.router(x, self.topk)
 
+        for i in range(self.topk):
+            for j in range(batch_size):
+                expert_idx = indices[j, i]
+                gate = gates[j, i]
+                item = x[j:j+1]
+                expert_output = self.experts[expert_idx](item)
+                outputs[j] += gate * expert_output[0]
+
         return outputs
 
     def __call__(self, x):
@@ -251,7 +271,41 @@ class MoE_EP:
         # 4. Send the results back and gate-combine into `outputs`.
         indices, gates = self.router(x, self.topk)
 
-        return outputs
+        send_requests = [[] for _ in range(self.world_size)]
+        for i in range(batch_size):
+            if i % self.world_size != self.rank:
+                continue
+
+            for k in range(self.topk):
+                expert_idx = indices[i, k]
+                gate = gates[i, k]
+                send_requests[expert_idx].append((i, x[i:i+1], gate))
+        
+        received_requests = mpi.alltoall(send_requests)
+
+        send_responses = [[] for _ in range(self.world_size)]
+
+        for source_rank, requests in enumerate(received_requests):
+            if not requests:
+                continue
+            
+            tokens = np.stack([request[2] for request in requests], axis=1)
+            expert_outputs = self.expert(tokens)
+
+            for request, output in zip(requests, expert_outputs):
+                batch_idx, gate, _ = request
+                send_responses[source_rank].append((batch_idx, gate, output.copy()))
+            
+        received_responses = mpi.alltoall(send_responses)
+
+        for responses in received_responses:
+            for batch_idx, gate, output in responses:
+                outputs[batch_idx] += gate * output
+        
+        full_outputs = np.zeros_like(outputs)
+        mpi.Allreduce(outputs, full_outputs, op=mpi.SUM)
+
+        return full_outputs
 
     def __call__(self, x):
         return self.forward(x)
