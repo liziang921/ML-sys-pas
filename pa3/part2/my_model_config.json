@@ -1,12 +1,23 @@
 {
-  "_comment": "Replace this file with your own model design under the Part 2.2 budget. Use llama3_8b_config.json as a template.",
-  "architectures": ["LlamaForCausalLM"],
-  "hidden_size": 0,
-  "intermediate_size": 0,
-  "num_attention_heads": 0,
-  "num_key_value_heads": 0,
-  "num_hidden_layers": 0,
+  "_comment": "Llama-style dense model designed for the $5M compute-budget optimum: approximately 97.9B parameters.",
+  "architectures": [
+    "LlamaForCausalLM"
+  ],
+  "bos_token_id": 128000,
+  "eos_token_id": 128001,
+  "hidden_act": "silu",
+  "hidden_size": 8192,
+  "initializer_range": 0.02,
+  "intermediate_size": 28672,
   "max_position_embeddings": 8192,
-  "vocab_size": 128256,
-  "torch_dtype": "bfloat16"
+  "model_type": "llama",
+  "num_attention_heads": 64,
+  "num_hidden_layers": 112,
+  "num_key_value_heads": 8,
+  "rms_norm_eps": 1e-05,
+  "rope_theta": 500000.0,
+  "tie_word_embeddings": false,
+  "torch_dtype": "bfloat16",
+  "use_cache": true,
+  "vocab_size": 128256
 }
