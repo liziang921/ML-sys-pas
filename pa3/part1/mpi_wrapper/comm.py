@@ -82,16 +82,106 @@ class Communicator(object):
 
     # ---------- optional: paste your PA2 implementations here ----------
     def myAllreduce(self, src_array, dest_array, op=MPI.SUM):
-        """OPTIONAL: paste your PA2 implementation here to use it in this PA."""
-        raise NotImplementedError(
-            "myAllreduce is optional in PA3. Paste your PA2 implementation to enable it."
-        )
+        """
+        A manual implementation of all-reduce using a reduce-to-root
+        followed by a broadcast.
+
+        Do not call built-in MPI collective operations inside this method.
+        Use point-to-point communication such as Send, Recv, or Sendrecv.
+        Your implementation should respect the passed reduction operator.
+        The required operators for this assignment are MPI.MIN, MPI.SUM,
+        and MPI.MAX.
+        
+        Each non-root process sends its data to process 0, which applies the
+        reduction operator (by default, summation). Then process 0 sends the
+        reduced result back to all processes.
+        
+        The transfer cost is computed as:
+          - For non-root processes: one send and one receive.
+          - For the root process: (n-1) receives and (n-1) sends.
+        """
+        assert src_array.size == dest_array.size
+
+        nprocs = self.comm.Get_size()  # number of processes
+        rank = self.comm.Get_rank()  # rank of the current process
+        root = 0
+
+        src_array_byte = src_array.itemsize * src_array.size
+        dest_array_byte = dest_array.itemsize * dest_array.size
+
+        if rank == root:
+            # Root process receives data from all other processes and applies reduction.
+            reduced = np.array(src_array, copy=True)
+            temp = np.empty_like(src_array)
+
+            for src in range(nprocs):
+                if src == root:
+                    continue
+
+                self.comm.Recv(temp, source=src, tag=0)
+
+                if op == MPI.SUM:
+                    reduced += temp
+                elif op == MPI.MIN:
+                    np.minimum(reduced, temp, out=reduced)
+                elif op == MPI.MAX:
+                    np.maximum(reduced, temp, out=reduced)
+                else:
+                    raise ValueError("Unsupported reduction operator")
+
+            np.copyto(dest_array, reduced)
+
+            for dest in range(nprocs):
+                if dest == root:
+                    continue
+                self.comm.Send(dest_array, dest=dest, tag=0)
+        else:
+            # Non-root processes send their data to the root and receive the reduced result.
+            self.comm.Send(src_array, dest=root, tag=0)
+            self.comm.Recv(dest_array, source=root, tag=0)
+            self.total_bytes_transferred += src_array_byte + dest_array_byte
 
     def myAlltoall(self, src_array, dest_array):
-        """OPTIONAL: paste your PA2 implementation here to use it in this PA."""
-        raise NotImplementedError(
-            "myAlltoall is optional in PA3. Paste your PA2 implementation to enable it."
+        """Manual all-to-all using pairwise Sendrecv exchanges."""
+        nprocs = self.comm.Get_size()
+        rank = self.comm.Get_rank()
+
+        assert src_array.size % nprocs == 0, (
+            "src_array size must be divisible by the number of processes"
         )
+        assert dest_array.size % nprocs == 0, (
+            "dest_array size must be divisible by the number of processes"
+        )
+
+        send_count = src_array.size // nprocs
+        recv_count = dest_array.size // nprocs
+        assert send_count == recv_count
+
+        src_flat = src_array.reshape(-1)
+        dest_flat = dest_array.reshape(-1)
+
+        for other in range(nprocs):
+            send_start = other * send_count
+            send_end = send_start + send_count
+            recv_start = other * recv_count
+            recv_end = recv_start + recv_count
+
+            if other == rank:
+                np.copyto(dest_flat[recv_start:recv_end], src_flat[send_start:send_end])
+            else:
+                self.comm.Sendrecv(
+                    sendbuf=src_flat[send_start:send_end],
+                    dest=other,
+                    sendtag=rank,
+                    recvbuf=dest_flat[recv_start:recv_end],
+                    source=other,
+                    recvtag=other,
+                )
+
+        send_seg_bytes = src_array.itemsize * send_count
+        recv_seg_bytes = dest_array.itemsize * recv_count
+        self.total_bytes_transferred += send_seg_bytes * (nprocs - 1)
+        self.total_bytes_transferred += recv_seg_bytes * (nprocs - 1)
 
 
 # Default global communicator (mirrors the pa2 convention).

@@ -120,25 +120,21 @@ class ShardedLinear:
 
     def __call__(self, x):
         if x.shape[0] == 0:
-            return np.zeros((0, self.out_features_global), dtype=np.float32)
+            return np.zeros((0, self.out_features_global), dtype=self.weight.dtype)
 
-        result = np.zeros((x.shape[0], self.out_features_global), dtype=np.float32)
-
-        # TODO (Part 1.1): compute this rank's partial output and use a
-        # collective so every rank ends up with the full
-        # (batch_size, out_features) result.
         local_output = np.dot(x, self.weight) + self.bias
-        
+
         padded_output = np.zeros(
             (x.shape[0], self.out_features_global),
             dtype=local_output.dtype
         )
+        result = np.zeros_like(padded_output)
 
         start = self.output_offset
         end = start + self.local_out_features
         padded_output[:, start:end] = local_output
 
-        mpi.Allreduce(padded_output, result, op=mpi.SUM)
+        mpi.Allreduce(padded_output, result)
         return result
 
 
@@ -197,7 +193,6 @@ class MoE_TP:
         batch_size = x.shape[0]
         outputs = np.zeros((batch_size, self.output_dim))
 
-        # TODO (Part 1.1): implement the TP-style forward pass.
         # 1. Get routing indices and gates from self.router(x, self.topk).
         # 2. Run each routed token through its assigned expert and
         #    gate-combine the results into `outputs`.
@@ -232,13 +227,22 @@ class MoE_EP:
     builds `world_size` buckets (one per destination rank) and exchanges them.
     """
 
-    def __init__(self, input_dim, hidden_dim, output_dim, num_experts, topk=1):
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim,
+        output_dim,
+        num_experts,
+        topk=1,
+        use_custom_alltoall=True,
+    ):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.num_experts = num_experts  # == world size
         self.topk = min(topk, self.num_experts)
         self.rank = mpi.Get_rank()
         self.world_size = mpi.Get_size()
+        self.use_custom_alltoall = use_custom_alltoall
 
         assert num_experts == self.world_size, (
             "MoE_EP assumes one expert per rank; got "
@@ -264,13 +268,14 @@ class MoE_EP:
         batch_size = x.shape[0]
         outputs = np.zeros((batch_size, self.output_dim))
 
-        # TODO (Part 1.2): implement the EP-style forward pass.
-        # 1. Get routing indices and gates from self.router(x, self.topk).
-        # 2. Send each token to the rank that owns its assigned expert.
-        # 3. Run this rank's local expert on the tokens it received.
-        # 4. Send the results back and gate-combine into `outputs`.
         indices, gates = self.router(x, self.topk)
 
+        if self.use_custom_alltoall:
+            return self._forward_custom_alltoall(x, indices, gates, outputs)
+        return self._forward_pickle_alltoall(x, indices, gates, outputs)
+
+    def _forward_pickle_alltoall(self, x, indices, gates, outputs):
+        batch_size = x.shape[0]
         send_requests = [[] for _ in range(self.world_size)]
         for i in range(batch_size):
             if i % self.world_size != self.rank:
@@ -289,21 +294,92 @@ class MoE_EP:
             if not requests:
                 continue
             
-            tokens = np.stack([request[2] for request in requests], axis=1)
+            tokens = np.concatenate([request[1] for request in requests], axis=0)
             expert_outputs = self.expert(tokens)
 
             for request, output in zip(requests, expert_outputs):
-                batch_idx, gate, _ = request
-                send_responses[source_rank].append((batch_idx, gate, output.copy()))
+                batch_idx, _, gate = request
+                send_responses[source_rank].append((batch_idx, output.copy(), gate))
             
         received_responses = mpi.alltoall(send_responses)
 
         for responses in received_responses:
-            for batch_idx, gate, output in responses:
+            for batch_idx, output, gate in responses:
                 outputs[batch_idx] += gate * output
         
         full_outputs = np.zeros_like(outputs)
-        mpi.Allreduce(outputs, full_outputs, op=mpi.SUM)
+        mpi.Allreduce(outputs, full_outputs)
+
+        return full_outputs
+
+    def _forward_custom_alltoall(self, x, indices, gates, outputs):
+        batch_size = x.shape[0]
+        local_token_capacity = (batch_size + self.world_size - 1) // self.world_size
+        request_capacity = max(1, local_token_capacity * self.topk)
+        request_width = 2 + self.input_dim
+        request_dtype = np.result_type(x.dtype, gates.dtype, np.float64)
+
+        # Request record: [batch_idx, gate, token...]. batch_idx == -1 is padding.
+        send_requests = np.full(
+            (self.world_size, request_capacity, request_width),
+            -1,
+            dtype=request_dtype,
+        )
+        request_counts = np.zeros(self.world_size, dtype=np.int64)
+
+        for i in range(batch_size):
+            if i % self.world_size != self.rank:
+                continue
+
+            for k in range(self.topk):
+                expert_idx = indices[i, k]
+                slot = request_counts[expert_idx]
+                send_requests[expert_idx, slot, 0] = i
+                send_requests[expert_idx, slot, 1] = gates[i, k]
+                send_requests[expert_idx, slot, 2:] = x[i]
+                request_counts[expert_idx] += 1
+
+        received_requests = np.empty_like(send_requests)
+        mpi.myAlltoall(send_requests, received_requests)
+
+        # Response record: [batch_idx, gate, expert_output...].
+        response_width = 2 + self.output_dim
+        send_responses = np.full(
+            (self.world_size, request_capacity, response_width),
+            -1,
+            dtype=request_dtype,
+        )
+
+        for source_rank in range(self.world_size):
+            valid_mask = received_requests[source_rank, :, 0] >= 0
+            if not np.any(valid_mask):
+                continue
+
+            request_rows = received_requests[source_rank, valid_mask]
+            tokens = request_rows[:, 2:]
+            expert_outputs = self.expert(tokens)
+
+            send_responses[source_rank, : request_rows.shape[0], 0] = request_rows[:, 0]
+            send_responses[source_rank, : request_rows.shape[0], 1] = request_rows[:, 1]
+            send_responses[source_rank, : request_rows.shape[0], 2:] = expert_outputs
+
+        received_responses = np.empty_like(send_responses)
+        mpi.myAlltoall(send_responses, received_responses)
+
+        for source_rank in range(self.world_size):
+            valid_mask = received_responses[source_rank, :, 0] >= 0
+            if not np.any(valid_mask):
+                continue
+
+            response_rows = received_responses[source_rank, valid_mask]
+            for response in response_rows:
+                batch_idx = int(response[0])
+                gate = response[1]
+                output = response[2:]
+                outputs[batch_idx] += gate * output
+
+        full_outputs = np.zeros_like(outputs)
+        mpi.Allreduce(outputs, full_outputs)
 
         return full_outputs
 
