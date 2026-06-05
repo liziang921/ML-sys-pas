@@ -73,3 +73,24 @@ Greedy decoding was important for stable acceptance measurements, since
 sampling would introduce random draft choices and lower deterministic agreement
 with the target. fp16 reduced memory use and improved GPU throughput compared
 with full precision while preserving the greedy outputs for this benchmark.
+
+
+## Bonus: N-Gram Lookup Decoding
+
+I implemented n-gram lookup decoding as a lightweight speculative source before
+the normal draft model. At each step, the decoder searches the generated token
+context for a repeated recent suffix. If it finds a previous occurrence, it
+copies the tokens that followed that occurrence and uses them as speculative
+tokens; otherwise it falls back to the Pythia draft model. The target model
+still verifies every proposed token, so incorrect n-gram guesses are rejected.
+
+Using the same three prompts as the main benchmark at `k=8`, the n-gram variant
+achieved 95.12% acceptance, 2.59x speedup, 401.41 speculative tok/s, and
+115.57 baseline tok/s, with an n-gram hit rate of 84.13%. The acceptance rate
+matched the standard `k=8` run, but throughput was much higher because many
+draft proposals came from cheap token lookup instead of a neural draft-model
+forward pass. N-gram lookup is most useful when generated text repeats phrases,
+templates, code patterns, or lyrics. It is less general than learned tree
+speculation methods, because copied continuations can be wrong in novel prose,
+but target verification keeps the final output correct by rejecting mismatched
+tokens.
